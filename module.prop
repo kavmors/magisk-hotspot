@@ -1,6 +1,6 @@
 id=magisk-hotspot
 name=Magisk Hotspot
-version=1.1.0
-versionCode=10100
+version=1.1.1
+versionCode=10101
 author=kavmors
-description=Configurable Android hotspot with a stable local IP and DNS name
+description=Hotspot inactive

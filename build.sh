@@ -3,7 +3,7 @@ set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 OUT="$ROOT/dist"
-ZIP="$OUT/magisk-hotspot-v1.1.0.zip"
+ZIP="$OUT/magisk-hotspot-v1.1.1.zip"
 
 "$ROOT/tools/build-hotspotctl.sh"
 mkdir -p "$OUT"

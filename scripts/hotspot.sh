@@ -16,6 +16,10 @@ configure_hotspot() {
 }
 
 start_hotspot() {
+  if [ -z "$SSID" ]; then
+    log "hotspot not started because hotspot.ssid is empty"
+    return 0
+  fi
   if configure_hotspot; then
     OUTPUT=$(run_ctl start 2>&1)
     STATUS=$?
@@ -27,7 +31,11 @@ start_hotspot() {
 
   # Some vendor ROMs restrict the framework tethering call but keep AOSP's
   # privileged Wi-Fi shell command. This fallback still provides SoftAP mode.
-  OUTPUT=$(cmd wifi start-softap "$SSID" wpa2 "$PASSWORD" -b "$BAND_ARG" 2>&1)
+  if [ -n "$PASSWORD" ]; then
+    OUTPUT=$(cmd wifi start-softap "$SSID" wpa2 "$PASSWORD" -b "$BAND_ARG" 2>&1)
+  else
+    OUTPUT=$(cmd wifi start-softap "$SSID" open -b "$BAND_ARG" 2>&1)
+  fi
   STATUS=$?
   log "cmd wifi fallback: $OUTPUT"
   return "$STATUS"
@@ -69,32 +77,65 @@ find_hotspot_interface() {
   '
 }
 
-ensure_stable_ip() {
-  IFACE=$(find_hotspot_interface)
-  [ -n "$IFACE" ] || return 1
+find_interface_ipv4() {
+  ip -o -4 addr show dev "$1" scope global 2>/dev/null |
+    awk 'NR == 1 { address = $4; sub(/\/.*/, "", address); print address; exit }'
+}
 
-  if ! ip -o -4 addr show dev "$IFACE" 2>/dev/null |
-      awk '{ address = $4; sub(/\/.*/, "", address); print address }' |
-      grep -Fx "$IP_ADDRESS" >/dev/null 2>&1; then
-    ip address add "$IP_CIDR" dev "$IFACE" || return 1
-    log "added $IP_CIDR to $IFACE"
+ensure_stable_ip() {
+  [ -n "$SSID" ] || return 1
+  IFACE=$(find_hotspot_interface)
+  if [ -z "$IFACE" ]; then
+    set_module_inactive_description || true
+    return 1
   fi
 
-  ensure_firewall_rule "$IFACE" "$IP_ADDRESS" ||
-    log "WARN: could not install IPv4 INPUT allow rule"
-  ensure_dns_server || return 1
-  ensure_dns_redirect "$IFACE" "$IP_ADDRESS" || {
-    log "ERROR: could not redirect hotspot DNS traffic"
+  if [ -n "$IP_CIDR" ]; then
+    if ! ip -o -4 addr show dev "$IFACE" 2>/dev/null |
+        awk '{ address = $4; sub(/\/.*/, "", address); print address }' |
+        grep -Fx "$IP_ADDRESS" >/dev/null 2>&1; then
+      ip address add "$IP_CIDR" dev "$IFACE" || return 1
+      log "added $IP_CIDR to $IFACE"
+    fi
+    DNS_ADDRESS=$IP_ADDRESS
+    ensure_firewall_rule "$IFACE" "$IP_ADDRESS" ||
+      log "WARN: could not install IPv4 INPUT allow rule"
+  else
+    DNS_ADDRESS=$(find_interface_ipv4 "$IFACE")
+  fi
+  if [ -z "$DNS_ADDRESS" ]; then
+    set_module_inactive_description || true
+    return 1
+  fi
+  set_module_running_description "$DNS_ADDRESS" "$DNS_DOMAIN" ||
+    log "WARN: could not update module description"
+
+  if [ -n "$DNS_DOMAIN" ]; then
+    ensure_firewall_rule "$IFACE" "$DNS_ADDRESS" ||
+      log "WARN: could not install IPv4 INPUT allow rule"
+    ensure_dns_server || return 1
+    ensure_dns_redirect "$IFACE" "$DNS_ADDRESS" || {
+      log "ERROR: could not redirect hotspot DNS traffic"
+      stop_dns_server
+      remove_dns_redirect
+      return 1
+    }
+  else
     stop_dns_server
     remove_dns_redirect
-    return 1
-  }
+  fi
   write_state "$IFACE" "$IP_CIDR"
   return 0
 }
 
 apply_config() {
   load_config || return 1
+  if [ -z "$SSID" ]; then
+    cleanup_network
+    stop_hotspot
+    log "hotspot disabled because hotspot.ssid is empty"
+    return 0
+  fi
   cleanup_network
   stop_hotspot
 

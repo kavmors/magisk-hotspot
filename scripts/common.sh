@@ -1,6 +1,7 @@
 #!/system/bin/sh
 
 CONFIG_FILE=${MAGISK_HOTSPOT_CONFIG:-"$MODDIR/config.yml"}
+MODULE_PROP=${MAGISK_HOTSPOT_MODULE_PROP:-"$MODDIR/module.prop"}
 RUNDIR=${MAGISK_HOTSPOT_RUNDIR:-/data/adb/magisk-hotspot}
 LOG_FILE="$RUNDIR/hotspot.log"
 STATE_FILE="$RUNDIR/state"
@@ -9,6 +10,7 @@ DNS_CHAIN=MAGISK_HOTSPOT_DNS
 DNS_PORT=1053
 DNS_PID_FILE="$RUNDIR/dns-server.pid"
 DNS_LOG_FILE="$RUNDIR/dns-server.log"
+DNS_STATE_FILE="$RUNDIR/dns-server.state"
 
 mkdir -p "$RUNDIR"
 chmod 0700 "$RUNDIR" 2>/dev/null || true
@@ -28,6 +30,40 @@ log() {
   rotate_log
   printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >> "$LOG_FILE"
   command log -t MagiskHotspot "$*" 2>/dev/null || true
+}
+
+set_module_description() {
+  DESCRIPTION=$1
+  [ -r "$MODULE_PROP" ] || return 0
+  CURRENT_DESCRIPTION=$(sed -n 's/^description=//p' "$MODULE_PROP" | sed -n '1p')
+  [ "$CURRENT_DESCRIPTION" = "$DESCRIPTION" ] && return 0
+
+  MODULE_PROP_TMP="$MODULE_PROP.tmp.$$"
+  awk -v description="$DESCRIPTION" '
+    BEGIN { replaced = 0 }
+    /^description=/ {
+      if (!replaced) print "description=" description
+      replaced = 1
+      next
+    }
+    { print }
+    END { if (!replaced) print "description=" description }
+  ' "$MODULE_PROP" > "$MODULE_PROP_TMP" || {
+    rm -f "$MODULE_PROP_TMP"
+    return 1
+  }
+  chmod 0644 "$MODULE_PROP_TMP" 2>/dev/null || true
+  mv -f "$MODULE_PROP_TMP" "$MODULE_PROP"
+}
+
+set_module_running_description() {
+  RUNNING_DESCRIPTION="IP: $1"
+  [ -z "$2" ] || RUNNING_DESCRIPTION="$RUNNING_DESCRIPTION | DNS: $2"
+  set_module_description "$RUNNING_DESCRIPTION"
+}
+
+set_module_inactive_description() {
+  set_module_description "Hotspot inactive"
 }
 
 # Reads the intentionally small YAML subset used by config.yml. It supports
@@ -141,12 +177,13 @@ load_config() {
   NEW_KEEP_ALIVE=$(yaml_get behavior keep_alive)
   NEW_RETRY_INTERVAL=$(yaml_get behavior retry_interval_seconds)
 
-  [ -n "$NEW_SSID" ] && [ "${#NEW_SSID}" -le 32 ] || {
-    log "ERROR: hotspot.ssid must contain 1-32 characters"
+  [ "${#NEW_SSID}" -le 32 ] || {
+    log "ERROR: hotspot.ssid must contain at most 32 characters"
     return 1
   }
-  [ "${#NEW_PASSWORD}" -ge 8 ] && [ "${#NEW_PASSWORD}" -le 63 ] || {
-    log "ERROR: hotspot.password must contain 8-63 characters"
+  { [ -z "$NEW_PASSWORD" ] ||
+    { [ "${#NEW_PASSWORD}" -ge 8 ] && [ "${#NEW_PASSWORD}" -le 63 ]; }; } || {
+    log "ERROR: hotspot.password must be empty or contain 8-63 characters"
     return 1
   }
 
@@ -160,14 +197,11 @@ load_config() {
       ;;
   esac
 
-  validate_ipv4_cidr "$NEW_IP_CIDR" || {
+  { [ -z "$NEW_IP_CIDR" ] || validate_ipv4_cidr "$NEW_IP_CIDR"; } || {
     log "ERROR: network.ip_address must be a valid private IPv4 /32 CIDR"
     return 1
   }
-  # Config files preserved from versions before DNS support do not contain
-  # this section, so upgrades use the same default as a fresh installation.
-  [ -n "$NEW_DNS_DOMAIN" ] || NEW_DNS_DOMAIN=magisk.home.arpa
-  validate_dns_domain "$NEW_DNS_DOMAIN" || {
+  { [ -z "$NEW_DNS_DOMAIN" ] || validate_dns_domain "$NEW_DNS_DOMAIN"; } || {
     log "ERROR: dns.domain must be a valid DNS name"
     return 1
   }
@@ -274,26 +308,31 @@ stop_dns_server() {
       kill -9 "$DNS_PID" 2>/dev/null || true
     fi
   fi
-  rm -f "$DNS_PID_FILE"
+  rm -f "$DNS_PID_FILE" "$DNS_STATE_FILE"
 }
 
 ensure_dns_server() {
-  dns_server_running && return 0
-  rm -f "$DNS_PID_FILE"
+  if dns_server_running && [ -r "$DNS_STATE_FILE" ] &&
+      [ "$(sed -n '1p' "$DNS_STATE_FILE")" = "$DNS_ADDRESS" ] &&
+      [ "$(sed -n '2p' "$DNS_STATE_FILE")" = "$DNS_DOMAIN" ]; then
+    return 0
+  fi
+  stop_dns_server
   : > "$DNS_LOG_FILE"
   CLASSPATH="$MODDIR/bin/hotspotctl.dex" \
     app_process /system/bin HotspotCtl dns-server \
-      "$IP_ADDRESS" "$DNS_DOMAIN" "$DNS_PORT" >> "$DNS_LOG_FILE" 2>&1 &
+      "$DNS_ADDRESS" "$DNS_DOMAIN" "$DNS_PORT" >> "$DNS_LOG_FILE" 2>&1 &
   DNS_PID=$!
   printf '%s\n' "$DNS_PID" > "$DNS_PID_FILE"
-  chmod 0600 "$DNS_PID_FILE" "$DNS_LOG_FILE" 2>/dev/null || true
+  printf '%s\n%s\n' "$DNS_ADDRESS" "$DNS_DOMAIN" > "$DNS_STATE_FILE"
+  chmod 0600 "$DNS_PID_FILE" "$DNS_LOG_FILE" "$DNS_STATE_FILE" 2>/dev/null || true
   sleep 1
   if dns_server_running; then
-    log "DNS server started: $DNS_DOMAIN -> $IP_ADDRESS"
+    log "DNS server started: $DNS_DOMAIN -> $DNS_ADDRESS"
     return 0
   fi
   log "ERROR: DNS server failed to start; see $DNS_LOG_FILE"
-  rm -f "$DNS_PID_FILE"
+  rm -f "$DNS_PID_FILE" "$DNS_STATE_FILE"
   return 1
 }
 
@@ -318,4 +357,5 @@ cleanup_network() {
   fi
   remove_firewall_rule
   rm -f "$STATE_FILE"
+  set_module_inactive_description || log "WARN: could not update module description"
 }

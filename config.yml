@@ -1,18 +1,19 @@
 # Strings must be enclosed in matching single or double quotes.
 hotspot:
-  ssid: "MagiskHotspot"
-  password: "change-me-123"
+  ssid: ""
+  password: ""
   # Supported values: "2.4GHz", "5GHz", "auto"
-  band: "2.4GHz"
+  band: "auto"
 
 network:
-  # /32 avoids changing Android's DHCP subnet. Clients reach this address via
-  # the hotspot's default route, even when Android chooses another DHCP range.
-  ip_address: "192.168.50.1/32"
+  # Leave empty to keep Android's DHCP subnet unchanged. A configured /32 is
+  # reachable through the hotspot's default route without replacing its subnet.
+  ip_address: ""
 
 dns:
-  # Hotspot clients resolve this name to network.ip_address.
-  domain: "magisk.home.arpa"
+  # Leave empty to disable DNS. Otherwise it resolves to network.ip_address,
+  # or to the hotspot interface's Android-assigned address when that is empty.
+  domain: ""
 
 behavior:
   boot_delay_seconds: 15

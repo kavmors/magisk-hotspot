@@ -6,34 +6,56 @@ TMP=${TMPDIR:-/tmp}/magisk-hotspot-test-$$
 trap 'rm -rf "$TMP"' EXIT INT TERM
 mkdir -p "$TMP/runtime"
 cp "$ROOT/config.yml" "$TMP/config.yml"
+cp "$ROOT/module.prop" "$TMP/module.prop"
 
 MODDIR=$ROOT
 MAGISK_HOTSPOT_CONFIG="$TMP/config.yml"
 MAGISK_HOTSPOT_RUNDIR="$TMP/runtime"
-export MAGISK_HOTSPOT_CONFIG MAGISK_HOTSPOT_RUNDIR
+MAGISK_HOTSPOT_MODULE_PROP="$TMP/module.prop"
+export MAGISK_HOTSPOT_CONFIG MAGISK_HOTSPOT_RUNDIR MAGISK_HOTSPOT_MODULE_PROP
 . "$ROOT/scripts/common.sh"
 
+# Empty optional values are valid and disable their corresponding features.
 load_config
-[ "$SSID" = MagiskHotspot ]
-[ "$PASSWORD" = change-me-123 ]
-[ "$BAND_ARG" = 2 ]
-[ "$IP_CIDR" = 192.168.50.1/32 ]
-[ "$DNS_DOMAIN" = magisk.home.arpa ]
+[ -z "$SSID" ]
+[ -z "$PASSWORD" ]
+[ "$BAND_ARG" = any ]
+[ -z "$IP_CIDR" ]
+[ -z "$IP_ADDRESS" ]
+[ -z "$DNS_DOMAIN" ]
 [ "$KEEP_ALIVE" = true ]
 
-sed 's/change-me-123/abc#12345/' "$ROOT/config.yml" > "$TMP/config.yml"
-load_config
-[ "$PASSWORD" = 'abc#12345' ]
+set_module_running_description 192.168.43.1 ""
+[ "$(sed -n 's/^description=//p' "$TMP/module.prop")" = "IP: 192.168.43.1" ]
+set_module_running_description 192.168.50.1 magisk.home.arpa
+[ "$(sed -n 's/^description=//p' "$TMP/module.prop")" = \
+  "IP: 192.168.50.1 | DNS: magisk.home.arpa" ]
+[ "$(grep -c '^description=' "$TMP/module.prop")" -eq 1 ]
+set_module_inactive_description
+[ "$(sed -n 's/^description=//p' "$TMP/module.prop")" = "Hotspot inactive" ]
 
-sed 's/2.4GHz/invalid/' "$ROOT/config.yml" > "$TMP/config.yml"
+sed \
+  -e 's/ssid: ""/ssid: "TestHotspot"/' \
+  -e 's/password: ""/password: "abc#12345"/' \
+  -e 's/band: "auto"/band: "2.4GHz"/' \
+  -e 's/ip_address: ""/ip_address: "192.168.50.1\/32"/' \
+  -e 's/domain: ""/domain: "HOST-01.Example."/' \
+  "$ROOT/config.yml" > "$TMP/config.yml"
+load_config
+[ "$SSID" = TestHotspot ]
+[ "$PASSWORD" = 'abc#12345' ]
+[ "$BAND_ARG" = 2 ]
+[ "$IP_CIDR" = 192.168.50.1/32 ]
+[ "$IP_ADDRESS" = 192.168.50.1 ]
+[ "$DNS_DOMAIN" = host-01.example ]
+
+sed 's/2.4GHz/invalid/' "$TMP/config.yml" > "$TMP/invalid.yml"
+MAGISK_HOTSPOT_CONFIG="$TMP/invalid.yml"
+CONFIG_FILE=$MAGISK_HOTSPOT_CONFIG
 if load_config; then
   echo "invalid band was accepted" >&2
   exit 1
 fi
-
-sed 's/magisk.home.arpa/HOST-01.Example./' "$ROOT/config.yml" > "$TMP/config.yml"
-load_config
-[ "$DNS_DOMAIN" = host-01.example ]
 
 for cidr in 192.168.1.1/32 10.0.0.1/32 172.16.8.1/32; do
   validate_ipv4_cidr "$cidr"
@@ -55,14 +77,22 @@ for domain in '' . bad..name -bad.example bad-.example 'bad name.example' 'bad_n
   fi
 done
 
-# Existing installations keep their config.yml during upgrades. Verify that a
-# pre-DNS config gets the documented default instead of becoming invalid.
+# Non-empty passwords are still required to meet WPA2 length constraints.
+sed 's/password: "abc#12345"/password: "short"/' "$TMP/config.yml" > "$TMP/invalid.yml"
+CONFIG_FILE="$TMP/invalid.yml"
+if load_config; then
+  echo "short password was accepted" >&2
+  exit 1
+fi
+
+# A config preserved from before DNS support now leaves DNS disabled.
 awk '
   /^dns:/ { skip = 1; next }
   skip && /^[^[:space:]]/ { skip = 0 }
   !skip { print }
-' "$ROOT/config.yml" > "$TMP/config.yml"
+' "$TMP/config.yml" > "$TMP/pre-dns.yml"
+CONFIG_FILE="$TMP/pre-dns.yml"
 load_config
-[ "$DNS_DOMAIN" = magisk.home.arpa ]
+[ -z "$DNS_DOMAIN" ]
 
 echo "config tests passed"

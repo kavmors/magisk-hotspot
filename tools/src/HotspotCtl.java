@@ -1,6 +1,7 @@
 import android.content.Context;
 import android.net.ConnectivityManager;
 import android.os.Build;
+import android.os.Looper;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
@@ -14,6 +15,7 @@ public final class HotspotCtl {
     private static final int BAND_2GHZ = 1;
     private static final int BAND_5GHZ = 2;
     private static final int BAND_ANY = 7;
+    private static final int SECURITY_TYPE_OPEN = 0;
     private static final int SECURITY_TYPE_WPA2_PSK = 1;
 
     private HotspotCtl() {}
@@ -29,12 +31,15 @@ public final class HotspotCtl {
                     if (args.length != 4) usage();
                     configure(context, args[1], args[2], parseBand(args[3]));
                     System.out.println("configuration saved");
+                    System.exit(0);
                     return;
                 case "start":
                     start(context);
+                    System.exit(0);
                     return;
                 case "stop":
                     stop(context);
+                    System.exit(0);
                     return;
                 case "dns-server":
                     if (args.length != 4) usage();
@@ -60,6 +65,9 @@ public final class HotspotCtl {
     }
 
     private static Context getSystemContext() throws Exception {
+        if (Looper.myLooper() == null) {
+            Looper.prepareMainLooper();
+        }
         Class<?> activityThreadClass = Class.forName("android.app.ActivityThread");
         Object activityThread = activityThreadClass.getMethod("systemMain").invoke(null);
         Method getSystemContext = activityThreadClass.getMethod("getSystemContext");
@@ -106,8 +114,13 @@ public final class HotspotCtl {
         Class<?> builderClass = Class.forName("android.net.wifi.SoftApConfiguration$Builder");
         Object builder = builderClass.getConstructor().newInstance();
         builderClass.getMethod("setSsid", String.class).invoke(builder, ssid);
-        builderClass.getMethod("setPassphrase", String.class, int.class)
-                .invoke(builder, password, SECURITY_TYPE_WPA2_PSK);
+        if (password.isEmpty()) {
+            builderClass.getMethod("setPassphrase", String.class, int.class)
+                    .invoke(builder, null, SECURITY_TYPE_OPEN);
+        } else {
+            builderClass.getMethod("setPassphrase", String.class, int.class)
+                    .invoke(builder, password, SECURITY_TYPE_WPA2_PSK);
+        }
         builderClass.getMethod("setBand", int.class).invoke(builder, band);
         Object config = builderClass.getMethod("build").invoke(builder);
         Object result = invokeCompatible(wifiManager, "setSoftApConfiguration", config);
@@ -119,11 +132,15 @@ public final class HotspotCtl {
         Class<?> configClass = Class.forName("android.net.wifi.WifiConfiguration");
         Object config = configClass.getConstructor().newInstance();
         setField(configClass, config, "SSID", ssid);
-        setField(configClass, config, "preSharedKey", password);
-
         BitSet keyManagement = (BitSet) configClass.getField("allowedKeyManagement").get(config);
         keyManagement.clear();
-        keyManagement.set(4); // WifiConfiguration.KeyMgmt.WPA2_PSK
+        if (password.isEmpty()) {
+            setField(configClass, config, "preSharedKey", null);
+            keyManagement.set(0); // WifiConfiguration.KeyMgmt.NONE
+        } else {
+            setField(configClass, config, "preSharedKey", password);
+            keyManagement.set(4); // WifiConfiguration.KeyMgmt.WPA2_PSK
+        }
 
         int legacyBand = band == BAND_2GHZ ? 0 : band == BAND_5GHZ ? 1 : -1;
         setField(configClass, config, "apBand", legacyBand);

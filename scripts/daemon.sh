@@ -35,39 +35,56 @@ done
 load_config || exit 1
 sleep "$BOOT_DELAY"
 
-FINGERPRINT=$(config_fingerprint)
-if "$MODDIR/scripts/hotspot.sh" apply; then
-  log "boot configuration applied"
-else
-  log "WARN: initial hotspot start failed; daemon will retry"
-fi
-
+FINGERPRINT=
+ACTIVE=false
+START_ATTEMPTED=false
 MISSES=0
 while true; do
-  sleep "$RETRY_INTERVAL"
-
+  if ! load_config; then
+    log "WARN: config.yml is invalid; daemon will retry"
+    sleep 3
+    continue
+  fi
   CURRENT_FINGERPRINT=$(config_fingerprint)
-  if [ -n "$CURRENT_FINGERPRINT" ] && [ "$CURRENT_FINGERPRINT" != "$FINGERPRINT" ]; then
-    if "$MODDIR/scripts/hotspot.sh" apply; then
-      FINGERPRINT=$CURRENT_FINGERPRINT
-      load_config || true
-      MISSES=0
-      log "reloaded changed config.yml"
-    else
-      log "WARN: changed config.yml is invalid or could not be applied"
+
+  if [ -z "$SSID" ]; then
+    if [ "$ACTIVE" = true ] || [ "$START_ATTEMPTED" = true ]; then
+      "$MODDIR/scripts/hotspot.sh" stop
+      log "hotspot stopped because hotspot.ssid is empty"
     fi
+    ACTIVE=false
+    START_ATTEMPTED=false
+    FINGERPRINT=$CURRENT_FINGERPRINT
+    MISSES=0
+    sleep 3
+    continue
+  fi
+
+  if [ "$ACTIVE" != true ] || [ "$CURRENT_FINGERPRINT" != "$FINGERPRINT" ]; then
+    START_ATTEMPTED=true
+    FINGERPRINT=$CURRENT_FINGERPRINT
+    if "$MODDIR/scripts/hotspot.sh" apply; then
+      load_config || true
+      ACTIVE=true
+      MISSES=0
+      log "configuration applied"
+    else
+      ACTIVE=false
+      log "WARN: hotspot start failed; daemon will retry"
+    fi
+    sleep "$RETRY_INTERVAL"
     continue
   fi
 
   if "$MODDIR/scripts/hotspot.sh" ensure-ip; then
     MISSES=0
-    continue
+  else
+    MISSES=$((MISSES + 1))
+    if [ "$KEEP_ALIVE" = true ] && [ "$MISSES" -ge 3 ]; then
+      log "hotspot unavailable; attempting restart"
+      ACTIVE=false
+      MISSES=0
+    fi
   fi
-
-  MISSES=$((MISSES + 1))
-  if [ "$KEEP_ALIVE" = true ] && [ "$MISSES" -ge 3 ]; then
-    log "hotspot unavailable; attempting restart"
-    "$MODDIR/scripts/hotspot.sh" apply || true
-    MISSES=0
-  fi
+  sleep "$RETRY_INTERVAL"
 done
